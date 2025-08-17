@@ -1,0 +1,165 @@
+#include "cache.h"
+
+// ------------------------- DO NOT CHANGE -------------------------------- //
+#define NUM_IP_TABLE_ENTRIES 1024           // IP table entries
+#define PREFETCH_DEGREE 5                   // Prefetch degree
+// ------------------------- DO NOT CHANGE -------------------------------- //
+
+// ------------ YOU CAN CHANGE THE IP_TABLE FOR YOU DESIGN ---------------- //
+class IP_TABLE {
+  public:
+    uint64_t ip_tag;
+    uint64_t last_page;                     // last page seen by IP
+    uint64_t last_cl_offset;                // last cl offset in the 4KB page
+    int64_t last_stride;                    // last delta observed
+    uint16_t ip_valid;                      // Valid IP or not   
+    int conf;                               // CPLX conf
+    uint16_t signature;                     // CPLX signature
+    int stride;                             // Stride
+
+    IP_TABLE () {
+        ip_tag = 0;
+        last_page = 0;
+        last_cl_offset = 0;
+        last_stride = 0;
+        ip_valid = 0;
+        signature = 0;
+        conf = 0;
+        stride = 0;
+    };
+};
+
+IP_TABLE trackers_cplx[NUM_CPUS][NUM_IP_TABLE_ENTRIES];
+
+// ------------------------- Updating the signature ---------------------------- // 
+uint16_t update_sig_l1(uint16_t old_sig, int delta) {                           
+    return (old_sig << 1) ^ (delta & 0x1);  // #YVR Shift and XOR with the last stride((Delta))
+    //return old_sig;
+}
+
+// ------------------- Updating confidence for the CPLX class ------------------ // 
+int update_conf(int stride, int pred_stride, int conf) {
+//int update_conf(int stride, int pred_stride, int conf,int cpu, int index) {
+
+    if (stride == pred_stride) {
+        return std::min(conf + 1, 3); // Increment confidence, max value 3
+    } else {
+        return std::max(conf - 1, 0);  // Decrement confidence, min value 0
+    }
+
+    //rrip type conf
+    // if( stride == pred_stride){
+    //     return  std::min(conf + 1, 3);
+    // }else{
+    //     conf = conf-1;
+    //     if(conf < 0){
+    //         trackers_cplx[cpu][index].ip_valid = 0;
+    //         return 0;
+    //     }
+    //     else{
+    //         return conf;
+    //     }
+    // }
+    
+
+    //return conf;
+}
+
+// ------------------------- Initialize the prefetcher ------------------------- // 
+void CACHE::l1d_prefetcher_initialize() 
+{
+	cout << "CPU " << cpu << " L1D Complex-Stride prefetcher" << endl;
+    
+}
+
+// --------------- This is the main prefetcher operate function ---------------- // 
+void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint8_t critical_ip_flag)
+{
+    uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
+
+	// --------------------- Add Complex-Stride pf_address logic here --------------------- // 
+    int index =-1;
+    for (index = 0; index < NUM_IP_TABLE_ENTRIES; index++) {
+        if (trackers_cplx[cpu][index].ip_tag == ip) {
+            break;
+        }
+    }
+     // #YVR If IP is not present, create a new entry
+    if (index == NUM_IP_TABLE_ENTRIES) {
+        for (index = 0; index < NUM_IP_TABLE_ENTRIES; index++) {
+            //cout<<trackers_cplx[cpu][index].ip_valid<<endl;
+            if (trackers_cplx[cpu][index].ip_valid == 0) {
+                trackers_cplx[cpu][index].ip_tag = ip;
+                trackers_cplx[cpu][index].last_cl_offset = cl_addr;
+                trackers_cplx[cpu][index].last_stride = 0;
+                trackers_cplx[cpu][index].signature = 0;
+                //trackers_cplx[cpu][index].conf = 0;  //normal
+                trackers_cplx[cpu][index].conf = 1;     //rrip
+                trackers_cplx[cpu][index].ip_valid = 1; // Mark as valid
+                return;
+            }
+        }
+        return; //#YVR No free slots found, nothing to do
+    }
+    //#YVR calculating the current stride
+    int64_t stride = cl_addr - trackers_cplx[cpu][index].last_cl_offset;
+
+    //if stide is equal to 0, No change in address, same instruction in a row, return nothing
+    if (stride == 0) return; 
+
+    //uint16_t old_signature = trackers_cplx[cpu][index].signature;
+    //trackers_cplx[cpu][index].signature = update_sig_l1(old_signature, stride);
+
+    //#YVR updating the signature
+    trackers_cplx[cpu][index].signature = update_sig_l1(trackers_cplx[cpu][index].signature, stride);
+    
+    // Last stride of the ip (need this to call the update_conf func)
+    //int predicted_stride = trackers_cplx[cpu][index].last_stride;             //#YVR - OVERHEAD
+    //trackers_cplx[cpu][index].conf = update_conf(stride, predicted_stride, trackers_cplx[cpu][index].conf); 
+
+//normal type    
+    trackers_cplx[cpu][index].conf = update_conf(stride, trackers_cplx[cpu][index].last_stride, trackers_cplx[cpu][index].conf);
+//rrip type
+    //trackers_cplx[cpu][index].conf = update_conf(stride, trackers_cplx[cpu][index].last_stride, trackers_cplx[cpu][index].conf, cpu ,index);
+
+    trackers_cplx[cpu][index].last_stride = stride; // Store last stride
+
+    if (trackers_cplx[cpu][index].conf > 1) {   // #YVR Confidence threshold
+        for (int i = 1; i <= PREFETCH_DEGREE; i++) {
+            uint64_t pf_address = (cl_addr + (stride * i)) << LOG2_BLOCK_SIZE;
+
+            // Ensure the prefetch address is within the same page
+            // only issue a prefetch if the prefetch address is in the same 4 KB page
+            // as the current demand access address
+            if ((pf_address >> LOG2_PAGE_SIZE) != (addr >> LOG2_PAGE_SIZE))
+                break;
+
+            prefetch_line(ip, addr, pf_address, FILL_L1, 0);
+        }
+    }
+    
+    // Update last access info
+    trackers_cplx[cpu][index].last_cl_offset = cl_addr;
+    return;
+
+	// prefetch_line(ip, addr, pf_address, FILL_L1, 0);
+
+}
+
+// ------------------------- DO NOT CHANGE -------------------------------- //
+void CACHE::l1d_prefetcher_notify_about_dtlb_eviction(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+
+}
+
+void CACHE::l1d_prefetcher_cache_fill(uint64_t v_addr, uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t v_evicted_addr, uint64_t evicted_addr, uint32_t metadata_in)
+{
+
+}
+
+void CACHE::l1d_prefetcher_final_stats()
+{
+	cout << "CPU " << cpu << " L1D complex stride prefetcher final stats" << endl;
+	cout << "Degree: " << PREFETCH_DEGREE << endl;
+}
+// ------------------------- DO NOT CHANGE -------------------------------- //

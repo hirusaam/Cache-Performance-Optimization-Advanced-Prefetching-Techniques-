@@ -1,0 +1,223 @@
+#include "cache.h"
+
+// ------------------------- DO NOT CHANGE -------------------------------- //
+#define IP_TRACKER_COUNT 64           // Number of IP trackers
+// ------------------------- DO NOT CHANGE -------------------------------- //
+
+#define PREFETCH_DEGREE 8          // Prefetch degree - you need to vary this!
+int occupied_entries_count = 0;
+class IP_TRACKER {
+  public:
+    // ------------------------- Define the IP_TRACKER class here ------------------------- //
+    uint64_t ip;
+    int stride;
+    uint64_t prev_addr;                     // last page seen by IP
+    char state;  //['I':Init, 'T':transient.'S':steady,'N':no pred]
+    IP_TRACKER () {
+        ip = 0;
+        stride =0;
+        prev_addr = 0;
+        state = 'I';
+    };
+    void print_row() {
+        cout << "IP: " <<ip <<" | "  << "stride: " <<stride <<" | "  << "prev: " <<prev_addr <<" | "  << "state: " <<state <<"\n";
+    }
+};
+
+IP_TRACKER trackers[IP_TRACKER_COUNT];
+
+// ------------------------- Initialize the prefetcher ------------------------- // 
+void CACHE::stlb_prefetcher_initialize() 
+{
+	cout << "CPU " << cpu << " STLB arbitrary stride prefetcher" << endl;
+
+}
+void print_RPT()
+{
+    for(int i=0;i<8;i++)
+    {
+        trackers[i].print_row();
+    }
+}
+int ip_matched_index (u_int64_t ip)
+{
+    // cout<<"matching ip.......\n";
+    for(int i=0;i<IP_TRACKER_COUNT;i++)
+    {
+        IP_TRACKER current_ip_row = trackers[i];
+        // current_ip_row.print_row();
+        if(ip == current_ip_row.ip)
+        {
+            // cout<<"matched ip for row " <<i <<"\n";
+            return i;
+        }
+
+
+    }
+    return -1;
+}
+
+void insert_row_entry(int index,uint64_t ip , int stride , uint64_t prev_addr , char state)
+{
+    // cout<<"inserting at " <<index <<"\n";
+    trackers[index].ip = ip;
+    trackers[index].stride = stride;
+    trackers[index].prev_addr = prev_addr;
+    trackers[index].state = state;
+
+}
+
+bool change_states(int index, bool prediction ,uint64_t curr_addr, IP_TRACKER row)
+{
+    uint64_t prev_addr = row.prev_addr;
+    char state = row.state;
+    int stride = row.stride;
+    uint64_t ip = row.ip;
+    switch(state){
+        case 'I' :
+            if(prediction){
+                insert_row_entry(index,ip,stride,curr_addr,'S');
+                return true;
+            }
+            else
+                insert_row_entry(index,ip,curr_addr-prev_addr,curr_addr,'T');
+        break;
+
+        case 'T':
+            if(prediction){
+                insert_row_entry(index,ip,stride,curr_addr,'S');
+                return true;
+                }
+            else
+                insert_row_entry(index,ip,curr_addr-prev_addr,curr_addr,'N');
+        break;
+
+        case 'S':
+        if(prediction){
+            insert_row_entry(index,ip,stride,curr_addr,'S');
+            return true;
+            }
+        else
+            insert_row_entry(index,ip,curr_addr-prev_addr,curr_addr,'T');
+        break;
+
+        case 'N':
+        if(prediction){
+            insert_row_entry(index,ip,stride,curr_addr,'T');
+            }
+        else
+            insert_row_entry(index,ip,curr_addr-prev_addr,curr_addr,'N');
+        break;
+    }
+    return false;
+
+}
+// --------------- This is the main prefetcher operate function ---------------- // 
+void CACHE::stlb_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint64_t prefetch_id, uint8_t instruction)
+{
+    // ------------------------ Add Arbitrary Stride pf_address logic here ----------------------- //
+    number_of_accesses++; 
+
+    addr = addr >> LOG2_PAGE_SIZE;
+
+    // cout<<"Addr " <<addr <<"\n";
+    // cout<<"IP " <<ip <<"\n";
+    // cout<<"cache hit " <<cache_hit <<"\n";
+    // cout<<"type " <<type <<"\n";
+    // cout<<"prefetch id" <<"\n";
+    // cout<<"instruction "<<"\n";
+    // printf("ip \n",ip);
+    // printf("Hex(Addr) %llx\n",addr);
+
+    // cout<<"-------------------------------------------------------\n";
+    // cout<<"before\n";
+    // print_RPT();
+    int matched_row_index = ip_matched_index(ip);
+    if(matched_row_index >= 0){
+        // cout<<"found an entry at index " <<matched_row_index <<"\n";
+        IP_TRACKER ip_row = trackers[matched_row_index]; //this is a copy
+        // cout<<"comparing "<<addr <<" == " <<ip_row.prev_addr <<" + " <<ip_row.stride <<"\n";
+        bool prediction = (addr == ip_row.prev_addr + ip_row.stride);
+        // cout<<"prediction is " <<prediction <<"\n"; 
+        bool is_steady = change_states(matched_row_index,prediction,addr,ip_row);
+
+        if(is_steady)
+        {
+
+            for (int i = 0; i < PREFETCH_DEGREE; i++)
+            {
+
+                uint64_t pf_address = (addr + ((i*ip_row.stride))) << LOG2_PAGE_SIZE; //#YVR
+
+                prefetch_translation(ip, pf_address, (int)2, 0, prefetch_id, instruction);
+            }
+        }
+
+    }
+    else {
+        if(occupied_entries_count < IP_TRACKER_COUNT) {//space available for new entry 
+            insert_row_entry(occupied_entries_count,ip,0,addr,'I');
+            occupied_entries_count++;
+
+    addr = addr >> LOG2_PAGE_SIZE;
+
+    // cout<<"Addr " <<addr <<"\n";
+    // cout<<"IP " <<ip <<"\n";
+    // cout<<"cache hit " <<cache_hit <<"\n";
+    // cout<<"type " <<type <<"\n";
+    // cout<<"prefetch id" <<"\n";
+    // cout<<"instruction "<<"\n";
+    // printf("ip \n",ip);
+    // printf("Hex(Addr) %llx\n",addr);
+
+    // cout<<"-------------------------------------------------------\n";
+    // cout<<"before\n";
+    // print_RPT();
+    int matched_row_index = ip_matched_index(ip);
+    if(matched_row_index >= 0){
+        // cout<<"found an entry at index " <<matched_row_index <<"\n";
+        IP_TRACKER ip_row = trackers[matched_row_index]; //this is a copy
+        // cout<<"comparing "<<addr <<" == " <<ip_row.prev_addr <<" + " <<ip_row.stride <<"\n";
+        bool prediction = (addr == ip_row.prev_addr + ip_row.stride);
+        // cout<<"prediction is " <<prediction <<"\n"; 
+        bool is_steady = change_states(matched_row_index,prediction,addr,ip_row);
+
+        if(is_steady)
+        {
+
+            for (int i = 0; i < PREFETCH_DEGREE; i++)
+            {
+
+                uint64_t pf_address = (addr + (((i+1) * ip_row.stride))) << LOG2_PAGE_SIZE;
+
+                prefetch_translation(ip, pf_address, (int)2, 0, prefetch_id, instruction);
+            }
+        }
+
+    }
+    else {
+        if(occupied_entries_count < IP_TRACKER_COUNT) {//space available for new entry 
+            insert_row_entry(occupied_entries_count,ip,0,addr,'I');
+            occupied_entries_count++;
+
+        }
+    }
+    // cout<<"after\n";
+    // print_RPT();
+    // prefetch_translation(ip, pf_address, (int)2, 0, prefetch_id, instruction);
+    
+    return;
+}
+
+// ------------------------- DO NOT CHANGE -------------------------------- //
+void CACHE::stlb_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+    return;
+}
+
+void CACHE::stlb_prefetcher_final_stats()
+{
+    cout << "CPU " << cpu << " STLB arbitrary stride prefetcher final stats" << endl;
+	cout << "Degree: " << PREFETCH_DEGREE << endl;
+}
+// ------------------------- DO NOT CHANGE -------------------------------- //
