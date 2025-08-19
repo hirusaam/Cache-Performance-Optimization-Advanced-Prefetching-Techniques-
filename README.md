@@ -104,15 +104,6 @@ The project is divided into **four tasks**:
 
 ---
 
-## Key Learnings  
-
-- Designing **prefetching strategies** for cache & TLB optimization  
-- Implementing **adaptive systems** that react to workload characteristics  
-- Evaluating **trade-offs** between aggressiveness and efficiency  
-- Using **ChampSim** for microarchitectural simulations  
-- Gaining hands-on experience with **memory hierarchy performance tuning**  
-
----
 
 ## 🚀 How to Run  
 
